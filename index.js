@@ -1,11 +1,15 @@
 const express = require('express');
 const app = express();
-const { User } = require('./db');
+const { Kitten, User } = require("./db");
+const jwt = require("jsonwebtoken");
+const SALT_COUNT = 10;
+const { JWT_SECRET } = process.env;
+const bcrypt = require("bcrypt");
 
 app.use(express.json());
-app.use(express.urlencoded({extended:true}));
+app.use(express.urlencoded({ extended: true }));
 
-app.get('/', async (req, res, next) => {
+app.get("/", async (req, res, next) => {
   try {
     res.send(`
       <h1>Welcome to Cyber Kittens!</h1>
@@ -15,27 +19,127 @@ app.get('/', async (req, res, next) => {
     `);
   } catch (error) {
     console.error(error);
-    next(error)
+    next(error);
   }
 });
 
 // Verifies token with jwt.verify and sets req.user
 // TODO - Create authentication middleware
+const setUser = async (req, res, next) => {
+  const token = req.header("Authorization");
+
+  if (!token) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  try {
+    const decoded = jwt.verify(token.split(" ")[1], process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).send("Unauthorized");
+  }
+};
 
 // POST /register
 // OPTIONAL - takes req.body of {username, password} and creates a new user with the hashed password
 
+app.post("/register", async (req, res, next) => {
+  const { username, password } = req.body;
+
+  const hashedPassword = await bcrypt.hash(password, SALT_COUNT);
+
+  const user = await User.create({ username, password: hashedPassword });
+
+  const { id } = user;
+  const token = jwt.sign({ id, username }, JWT_SECRET);
+
+  res.json({ message: "Success", token });
+});
+
 // POST /login
 // OPTIONAL - takes req.body of {username, password}, finds user by username, and compares the password with the hashed version from the DB
+
+app.post("/login", async (req, res, next) => {
+  const { username, password } = req.body;
+  const user = await User.findOne({ where: { username } });
+
+  if (!user) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const match = await bcrypt.compare(password, user.password);
+
+  if (!match) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const { id } = user;
+  const token = jwt.sign({ id, username }, JWT_SECRET);
+  res.json({ message: "Success", token });
+});
 
 // GET /kittens/:id
 // TODO - takes an id and returns the cat with that id
 
+app.get("/kittens/:id", setUser, async (req, res, next) => {
+  const kitten = await Kitten.findByPk(req.params.id);
+
+  if (!req.user) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  if (!kitten) {
+    return res.status(404).send("Kitten not found");
+  }
+
+  if (kitten.ownerId !== req.user.id) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  return res.json(kitten);
+});
+
 // POST /kittens
 // TODO - takes req.body of {name, age, color} and creates a new cat with the given name, age, and color
 
+app.post("/kittens", setUser, async (req, res) => {
+  if (!req.user) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const kitten = await Kitten.create({
+    name: req.body.name,
+    age: req.body.age,
+    color: req.body.color,
+    ownerId: req.body.id,
+  });
+
+  return res.status(201).json(kitten);
+});
+
 // DELETE /kittens/:id
 // TODO - takes an id and deletes the cat with that id
+
+app.delete("/kittens/:id", setUser, async (req, res) => {
+  if (!req.user) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const kitten = await Kitten.findByPk(req.params.id);
+
+  if (!kitten) {
+    return res.status(404).send("Kitten not found");
+  }
+
+  if (kitten.ownerId !== req.user.id) {
+    return res.status(403).send("Forbidden");
+  }
+
+  await kitten.destroy();
+
+  return res.sendStatus(204);
+});
 
 // error handling middleware, so failed tests receive them
 app.use((error, req, res, next) => {
